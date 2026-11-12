@@ -1,0 +1,389 @@
+#include "Reference.h"
+
+namespace
+{
+    constexpr double maxFileMinutes = 12.0;
+    constexpr int thumbPoints = 1400;
+
+    juce::String floatsToString (const float* data, size_t count)
+    {
+        return juce::MemoryBlock (data, count * sizeof (float)).toBase64Encoding();
+    }
+
+    bool stringToFloats (const juce::String& text, float* dest, size_t count)
+    {
+        juce::MemoryBlock block;
+        if (text.isEmpty() || ! block.fromBase64Encoding (text) || block.getSize() != count * sizeof (float))
+            return false;
+        std::memcpy (dest, block.getData(), block.getSize());
+        return true;
+    }
+
+    std::vector<float> stringToFloatVector (const juce::String& text)
+    {
+        juce::MemoryBlock block;
+        std::vector<float> v;
+        if (text.isNotEmpty() && block.fromBase64Encoding (text) && block.getSize() % sizeof (float) == 0)
+        {
+            v.resize (block.getSize() / sizeof (float));
+            std::memcpy (v.data(), block.getData(), block.getSize());
+        }
+        return v;
+    }
+
+    bool allFinite (const float* data, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i)
+            if (! std::isfinite (data[i]))
+                return false;
+        return true;
+    }
+}
+
+ReferenceManager::ReferenceManager (Listener& listenerToUse)
+    : juce::Thread ("ToneGenie analysis"), listener (listenerToUse)
+{
+    snapshot.status = "Drop an audio file here, or click Load, to capture its guitar tone.";
+}
+
+ReferenceManager::~ReferenceManager()
+{
+    stopThread (15000);
+    cancelPendingUpdate();
+}
+
+juce::String ReferenceManager::getFileWildcard()
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    return formats.getWildcardForAllFormats();
+}
+
+bool ReferenceManager::isSupportedFile (const juce::File& file)
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    return file.existsAsFile() && formats.findFormatForFileExtension (file.getFileExtension()) != nullptr;
+}
+
+void ReferenceManager::setStatus (const juce::String& text)
+{
+    {
+        const juce::ScopedLock sl (lock);
+        snapshot.status = text;
+    }
+    ++revision;
+}
+
+void ReferenceManager::analyse (const juce::File& file, const ReferenceSettings& settings)
+{
+    stopThread (15000);
+    cancelPendingUpdate();
+
+    {
+        const juce::ScopedLock sl (lock);
+        hasFinished = false;
+        jobFile = file;
+        jobSettings = settings;
+
+        if (snapshot.filePath != file.getFullPathName())
+        {
+            snapshot.thumbMin.clear();
+            snapshot.thumbMax.clear();
+            snapshot.duration = 0.0;
+        }
+
+        snapshot.filePath = file.getFullPathName();
+        snapshot.settings = settings;
+        snapshot.status = "Loading " + file.getFileName() + "...";
+    }
+
+    progress.store (0.0f);
+    busy.store (true);
+    ++revision;
+    startThread (juce::Thread::Priority::low);
+}
+
+void ReferenceManager::clear()
+{
+    stopThread (15000);
+    cancelPendingUpdate();
+
+    {
+        const juce::ScopedLock sl (lock);
+        snapshot = ReferenceSnapshot();
+        snapshot.status = "Drop an audio file here, or click Load, to capture its guitar tone.";
+        hasFinished = false;
+    }
+
+    busy.store (false);
+    ++revision;
+}
+
+ReferenceSnapshot ReferenceManager::getSnapshot() const
+{
+    const juce::ScopedLock sl (lock);
+    return snapshot;
+}
+
+void ReferenceManager::run()
+{
+    juce::File file;
+    ReferenceSettings settings;
+    {
+        const juce::ScopedLock sl (lock);
+        file = jobFile;
+        settings = jobSettings;
+    }
+
+    const auto fail = [this] (const juce::String& message)
+    {
+        busy.store (false);
+        setStatus (message);
+    };
+
+    // --- decode ---------------------------------------------------------------
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        return fail ("Could not read \"" + file.getFileName() + "\". Supported formats: " + formats.getWildcardForAllFormats());
+
+    const double sampleRate = reader->sampleRate;
+    const auto maxSamples = (juce::int64) (maxFileMinutes * 60.0 * sampleRate);
+    const bool truncated = reader->lengthInSamples > maxSamples;
+    const int numSamples = (int) juce::jmin (reader->lengthInSamples, maxSamples);
+    const int numChannels = reader->numChannels > 1 ? 2 : 1;
+
+    juce::AudioBuffer<float> audio;
+    audio.setSize (numChannels, numSamples);
+
+    // read in slices so a cancel request is honoured quickly
+    for (int pos = 0; pos < numSamples;)
+    {
+        if (threadShouldExit())
+            return;
+
+        const int n = juce::jmin (1 << 18, numSamples - pos);
+        if (! reader->read (&audio, pos, n, pos, true, numChannels > 1))
+            return fail ("Could not decode \"" + file.getFileName() + "\".");
+        pos += n;
+    }
+    reader.reset();
+
+    const float* left = audio.getReadPointer (0);
+    const float* right = numChannels > 1 ? audio.getReadPointer (1) : nullptr;
+
+    // --- waveform overview ----------------------------------------------------------
+    {
+        std::vector<float> mn ((size_t) thumbPoints, 0.0f), mx ((size_t) thumbPoints, 0.0f);
+
+        for (int p = 0; p < thumbPoints; ++p)
+        {
+            const int a = (int) ((juce::int64) p * numSamples / thumbPoints);
+            const int b = juce::jmax (a + 1, (int) ((juce::int64) (p + 1) * numSamples / thumbPoints));
+            float lo = 0.0f, hi = 0.0f;
+            for (int i = a; i < b && i < numSamples; ++i)
+            {
+                const float v = right != nullptr ? 0.5f * (left[i] + right[i]) : left[i];
+                lo = juce::jmin (lo, v);
+                hi = juce::jmax (hi, v);
+            }
+            mn[(size_t) p] = lo;
+            mx[(size_t) p] = hi;
+        }
+
+        const juce::ScopedLock sl (lock);
+        snapshot.thumbMin = std::move (mn);
+        snapshot.thumbMax = std::move (mx);
+        snapshot.duration = numSamples / sampleRate;
+        snapshot.status = "Listening to " + file.getFileName() + "...";
+    }
+    ++revision;
+
+    // --- analyse ----------------------------------------------------------------------
+    tg::ReferenceOptions options;
+    options.mode = settings.sourceMode == 1 ? tg::SourceMode::guitarOnly
+                 : settings.sourceMode == 2 ? tg::SourceMode::fullMix : tg::SourceMode::automatic;
+    options.focus = settings.focus == 1 ? tg::Focus::left
+                  : settings.focus == 2 ? tg::Focus::center
+                  : settings.focus == 3 ? tg::Focus::right : tg::Focus::automatic;
+    options.regionStartSec = settings.regionStart;
+    options.regionEndSec = settings.regionEnd;
+
+    auto result = tg::analyzeReference (left, right, (size_t) numSamples, sampleRate, options, [this] (float p)
+    {
+        progress.store (p);
+        return ! threadShouldExit();
+    });
+
+    if (threadShouldExit())
+        return;
+
+    if (truncated && result.ok)
+        result.message += " (Only the first " + std::to_string ((int) maxFileMinutes) + " minutes were used.)";
+
+    {
+        const juce::ScopedLock sl (lock);
+        finished = std::move (result);
+        hasFinished = true;
+    }
+
+    triggerAsyncUpdate();
+}
+
+void ReferenceManager::handleAsyncUpdate()
+{
+    tg::ReferenceResult result;
+    {
+        const juce::ScopedLock sl (lock);
+        if (! hasFinished)
+            return;
+
+        hasFinished = false;
+        result = std::move (finished);
+        finished = {};
+
+        snapshot.status = result.message.empty() ? juce::String ("Analysis failed.") : juce::String (result.message);
+        if (result.ok)
+        {
+            snapshot.profile = result.profile;
+            snapshot.hasProfile = true;
+        }
+    }
+
+    busy.store (false);
+    ++revision;
+
+    if (result.ok)
+        listener.referenceAnalysed (result.profile, std::move (result.guitar), result.guitarSampleRate);
+}
+
+//==============================================================================
+juce::ValueTree ReferenceManager::toValueTree() const
+{
+    const juce::ScopedLock sl (lock);
+
+    juce::ValueTree tree ("Reference");
+    tree.setProperty ("file", snapshot.filePath, nullptr);
+    tree.setProperty ("status", snapshot.status, nullptr);
+    tree.setProperty ("sourceMode", snapshot.settings.sourceMode, nullptr);
+    tree.setProperty ("focus", snapshot.settings.focus, nullptr);
+    tree.setProperty ("regionStart", snapshot.settings.regionStart, nullptr);
+    tree.setProperty ("regionEnd", snapshot.settings.regionEnd, nullptr);
+    tree.setProperty ("duration", snapshot.duration, nullptr);
+
+    if (! snapshot.thumbMin.empty() && snapshot.thumbMin.size() == snapshot.thumbMax.size())
+    {
+        tree.setProperty ("thumbMin", floatsToString (snapshot.thumbMin.data(), snapshot.thumbMin.size()), nullptr);
+        tree.setProperty ("thumbMax", floatsToString (snapshot.thumbMax.data(), snapshot.thumbMax.size()), nullptr);
+    }
+
+    if (snapshot.hasProfile)
+    {
+        const auto& p = snapshot.profile;
+        juce::ValueTree pt ("Profile");
+        pt.setProperty ("bands", tg::kNumBands, nullptr);
+        pt.setProperty ("target", floatsToString (p.targetDb.data(), p.targetDb.size()), nullptr);
+        pt.setProperty ("expected", floatsToString (p.expectedPreDb.data(), p.expectedPreDb.size()), nullptr);
+        pt.setProperty ("validLo", p.validLoHz, nullptr);
+        pt.setProperty ("validHi", p.validHiHz, nullptr);
+        pt.setProperty ("tilt", p.canonicalTiltDb, nullptr);
+        pt.setProperty ("voicing", p.voicing, nullptr);
+        pt.setProperty ("drive", p.drive, nullptr);
+        pt.setProperty ("comp", p.comp, nullptr);
+        pt.setProperty ("gate", p.gate, nullptr);
+        pt.setProperty ("reverbMix", p.reverbMix, nullptr);
+        pt.setProperty ("reverbDecay", p.reverbDecay, nullptr);
+        pt.setProperty ("fitError", p.fitError, nullptr);
+        pt.setProperty ("fromFullMix", p.fromFullMix, nullptr);
+        pt.setProperty ("exposed", p.usedExposedGuitar, nullptr);
+        pt.setProperty ("isolated", p.isolated, nullptr);
+        pt.setProperty ("mixProbability", p.mixProbability, nullptr);
+        pt.setProperty ("pan", p.isolationPan, nullptr);
+        pt.setProperty ("usedStart", p.usedStartSec, nullptr);
+        pt.setProperty ("usedEnd", p.usedEndSec, nullptr);
+        pt.setProperty ("crest", p.reference.crestDb, nullptr);
+        pt.setProperty ("sustain", p.reference.sustainDbPerSec, nullptr);
+        pt.setProperty ("spread", p.reference.levelSpreadDb, nullptr);
+        tree.appendChild (pt, nullptr);
+    }
+
+    return tree;
+}
+
+bool ReferenceManager::fromValueTree (const juce::ValueTree& tree, tg::ToneProfile& profileOut)
+{
+    ReferenceSnapshot s;
+    s.status = "Drop an audio file here, or click Load, to capture its guitar tone.";
+
+    if (tree.isValid())
+    {
+        s.filePath = tree["file"].toString();
+        if (tree.hasProperty ("status"))
+            s.status = tree["status"].toString();
+        s.settings.sourceMode = juce::jlimit (0, 2, (int) tree.getProperty ("sourceMode", 0));
+        s.settings.focus = juce::jlimit (0, 3, (int) tree.getProperty ("focus", 0));
+        s.settings.regionStart = tree.getProperty ("regionStart", -1.0);
+        s.settings.regionEnd = tree.getProperty ("regionEnd", -1.0);
+        s.duration = tree.getProperty ("duration", 0.0);
+        s.thumbMin = stringToFloatVector (tree["thumbMin"].toString());
+        s.thumbMax = stringToFloatVector (tree["thumbMax"].toString());
+
+        if (s.thumbMin.size() != s.thumbMax.size() || ! allFinite (s.thumbMin.data(), s.thumbMin.size())
+            || ! allFinite (s.thumbMax.data(), s.thumbMax.size()))
+        {
+            s.thumbMin.clear();
+            s.thumbMax.clear();
+        }
+
+        const auto pt = tree.getChildWithName ("Profile");
+        if (pt.isValid() && (int) pt.getProperty ("bands", 0) == tg::kNumBands)
+        {
+            tg::ToneProfile p;
+            const bool arraysOk = stringToFloats (pt["target"].toString(), p.targetDb.data(), p.targetDb.size())
+                               && stringToFloats (pt["expected"].toString(), p.expectedPreDb.data(), p.expectedPreDb.size())
+                               && allFinite (p.targetDb.data(), p.targetDb.size())
+                               && allFinite (p.expectedPreDb.data(), p.expectedPreDb.size());
+
+            if (arraysOk)
+            {
+                p.validLoHz = juce::jlimit (20.0f, 2000.0f, (float) pt.getProperty ("validLo", 60.0f));
+                p.validHiHz = juce::jlimit (2000.0f, 20000.0f, (float) pt.getProperty ("validHi", 16000.0f));
+                p.canonicalTiltDb = juce::jlimit (-40.0f, 40.0f, (float) pt.getProperty ("tilt", 0.0f));
+                p.voicing = juce::jlimit (0, (int) tg::numVoicings - 1, (int) pt.getProperty ("voicing", 1));
+                p.drive = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("drive", 0.5f));
+                p.comp = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("comp", 0.0f));
+                p.gate = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("gate", 0.2f));
+                p.reverbMix = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("reverbMix", 0.0f));
+                p.reverbDecay = juce::jlimit (0.2f, 8.0f, (float) pt.getProperty ("reverbDecay", 1.2f));
+                p.fitError = pt.getProperty ("fitError", 0.0f);
+                p.fromFullMix = pt.getProperty ("fromFullMix", false);
+                p.usedExposedGuitar = pt.getProperty ("exposed", false);
+                p.isolated = pt.getProperty ("isolated", false);
+                p.mixProbability = pt.getProperty ("mixProbability", 0.0f);
+                p.isolationPan = pt.getProperty ("pan", 0.0f);
+                p.usedStartSec = pt.getProperty ("usedStart", 0.0);
+                p.usedEndSec = pt.getProperty ("usedEnd", 0.0);
+                p.reference.crestDb = pt.getProperty ("crest", 0.0f);
+                p.reference.sustainDbPerSec = pt.getProperty ("sustain", 0.0f);
+                p.reference.levelSpreadDb = pt.getProperty ("spread", 0.0f);
+                p.reference.ltasDb = p.targetDb;
+                p.valid = true;
+
+                s.profile = p;
+                s.hasProfile = true;
+            }
+        }
+    }
+
+    {
+        const juce::ScopedLock sl (lock);
+        snapshot = s;
+    }
+    ++revision;
+
+    profileOut = s.profile;
+    return s.hasProfile;
+}
