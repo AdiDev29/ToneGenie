@@ -5,6 +5,7 @@
 #include "tonegenie/Reference.h"
 #include "tonegenie/ToneEngine.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

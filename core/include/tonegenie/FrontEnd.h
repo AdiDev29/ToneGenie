@@ -27,8 +27,8 @@ public:
     void down (const float* in, float* out, int n) noexcept;
 
 private:
-    float h[kTaps] {};
-    float phase[kFactor][kPhaseTaps] {};
+    float h[kTaps] {};                       ///< symmetric prototype low-pass
+    float phaseRev[kFactor][kPhaseTaps] {};  ///< polyphase branches, time-reversed
     float upBuf[kPhaseTaps - 1 + kMaxChunk] {};
     float downBuf[kTaps - 1 + kFactor * kMaxChunk] {};
 };

@@ -54,11 +54,41 @@ jobs:
             libasound2-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev \
             libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb fonts-dejavu-core
 
+      # CLAP support comes from a third-party wrapper; if that cannot be set up,
+      # carry on with the other formats instead of failing the whole build.
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+        run: |
+          if cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTONEGENIE_BUILD_CLAP=ON; then
+            echo "TONEGENIE_CLAP=ON" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Configuring with CLAP failed - building without the CLAP format"
+            rm -rf build
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTONEGENIE_BUILD_CLAP=OFF
+            echo "TONEGENIE_CLAP=OFF" >> "$GITHUB_ENV"
+          fi
 
       - name: Build
-        run: cmake --build build --config Release --parallel 4
+        shell: bash
+        run: |
+          TARGETS="ToneGenie_VST3 ToneGenie_Standalone tonegenie-cli tonegenie_tests tonegenie_plugin_test"
+          case "$RUNNER_OS" in
+            macOS) TARGETS="$TARGETS ToneGenie_AU" ;;
+            Linux) TARGETS="$TARGETS ToneGenie_LV2" ;;
+          esac
+          cmake --build build --config Release --parallel 4 --target $TARGETS
+
+      - name: Build CLAP
+        if: env.TONEGENIE_CLAP == 'ON'
+        continue-on-error: true
+        run: cmake --build build --config Release --parallel 4 --target ToneGenie_CLAP
+
+      - name: Check that the macOS build is universal
+        if: runner.os == 'macOS'
+        run: |
+          ARCHS="$(lipo -archs build/plugin/ToneGenie_artefacts/Release/VST3/ToneGenie.vst3/Contents/MacOS/ToneGenie)"
+          echo "architectures: $ARCHS"
+          case "$ARCHS" in *arm64*x86_64*|*x86_64*arm64*) ;; *) echo "::error::not a universal binary"; exit 1 ;; esac
 
       - name: Test
         shell: bash

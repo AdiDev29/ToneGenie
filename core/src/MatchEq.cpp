@@ -1,4 +1,5 @@
 #include "tonegenie/MatchEq.h"
+#include "tonegenie/Simd.h"
 
 #include <cstring>
 
@@ -97,7 +98,9 @@ MatchEq::MatchEq()
 {
     for (int b = 0; b < kNumBands; ++b)
     {
-        sharedMeasuredDb[(size_t) b].store (powerToDb (nominalPsd (b)));
+        const float db = powerToDb (nominalPsd (b));
+        sharedMeasuredDb[(size_t) b].store (db);
+        sharedRestoreDb[(size_t) b].store (db);
         sharedTargetDb[(size_t) b].store (0.0f);
         sharedExpectedDb[(size_t) b].store (0.0f);
         sharedEqDb[(size_t) b].store (0.0f);
@@ -132,19 +135,20 @@ void MatchEq::prepare (double sampleRate)
     psdScale = (float) (2.0 / (sr * wsum));
 
     ring.assign ((size_t) fftSize, 0.0f);
+    frameBuf.assign ((size_t) fftSize, 0.0f);
     power.assign ((size_t) fftSize / 2 + 1, 0.0f);
     fftBuf.assign ((size_t) fftSize, {});
 
+    priorWeight = (float) (kPriorSeconds * sr / hop);
     maxWeight = (float) (kMemorySeconds * sr / hop);
-    if (weight <= 0.0f)
-        weight = (float) (kPriorSeconds * sr / hop);
+    weight = weight <= 0.0f ? priorWeight : std::min (weight, maxWeight);
 
     firCur.assign ((size_t) numTaps, 0.0f);
     firTarget.assign ((size_t) numTaps, 0.0f);
     history.assign ((size_t) (numTaps - 1 + kMaxChunk), 0.0f);
-    scratch.assign ((size_t) kMaxChunk, 0.0f);
 
     reset();
+    frameState.store (0);
     publishMeasured();
 
     // Start with a valid filter straight away.
@@ -156,10 +160,9 @@ void MatchEq::designNow()
     pendingState.store (0);
     needsDesign.store (true);
     service();
-    std::memcpy (firTarget.data(), pendingFir.data(), sizeof (float) * (size_t) numTaps);
+    installPending();
     firCur = firTarget;
-    pendingState.store (0);
-    smoothBlocks = 0;
+    smoothSamplesLeft = 0;
 }
 
 void MatchEq::reset() noexcept
@@ -200,20 +203,16 @@ void MatchEq::setAmount (float amount01) noexcept
 
 void MatchEq::relearn() noexcept
 {
-    const bool target = hasTarget.load();
-    for (int b = 0; b < kNumBands; ++b)
-        avgPsd[(size_t) b] = target ? dbToPower (sharedExpectedDb[(size_t) b].load (std::memory_order_relaxed))
-                                    : nominalPsd (b);
-
-    weight = (float) (kPriorSeconds * sr / hop);
-    publishMeasured();
+    command.store (cmdRelearn);
+    needsDesign.store (true);
 }
 
-void MatchEq::publishMeasured() noexcept
+void MatchEq::setMeasured (const BandArray& db, float weightFrames) noexcept
 {
     for (int b = 0; b < kNumBands; ++b)
-        sharedMeasuredDb[(size_t) b].store (powerToDb (avgPsd[(size_t) b]), std::memory_order_relaxed);
-    sharedWeight.store (weight, std::memory_order_relaxed);
+        sharedRestoreDb[(size_t) b].store (db[(size_t) b], std::memory_order_relaxed);
+    sharedRestoreWeight.store (weightFrames, std::memory_order_relaxed);
+    command.store (cmdRestore);
     needsDesign.store (true);
 }
 
@@ -224,32 +223,45 @@ void MatchEq::getMeasured (BandArray& db, float& weightFrames) const noexcept
     weightFrames = sharedWeight.load (std::memory_order_relaxed);
 }
 
-void MatchEq::setMeasured (const BandArray& db, float weightFrames) noexcept
+//==============================================================================
+// design thread
+
+void MatchEq::publishMeasured() noexcept
 {
     for (int b = 0; b < kNumBands; ++b)
-        avgPsd[(size_t) b] = dbToPower (db[(size_t) b]);
-    weight = std::clamp (weightFrames, 1.0f, maxWeight);
+        sharedMeasuredDb[(size_t) b].store (powerToDb (avgPsd[(size_t) b]), std::memory_order_relaxed);
+    sharedWeight.store (weight, std::memory_order_relaxed);
+    needsDesign.store (true);
+}
+
+void MatchEq::handleCommand (int cmd) noexcept
+{
+    if (cmd == cmdRestore)
+    {
+        for (int b = 0; b < kNumBands; ++b)
+            avgPsd[(size_t) b] = dbToPower (sharedRestoreDb[(size_t) b].load (std::memory_order_relaxed));
+        weight = std::clamp (sharedRestoreWeight.load (std::memory_order_relaxed), 1.0f, maxWeight);
+    }
+    else
+    {
+        // Back to the prior: what the drive stage delivers for the calibration guitar.
+        const bool target = hasTarget.load();
+        for (int b = 0; b < kNumBands; ++b)
+            avgPsd[(size_t) b] = target ? dbToPower (sharedExpectedDb[(size_t) b].load (std::memory_order_relaxed))
+                                        : nominalPsd (b);
+        weight = priorWeight;
+    }
+
     publishMeasured();
 }
 
-void MatchEq::pushFrame() noexcept
+void MatchEq::analyseFrame() noexcept
 {
     for (int i = 0; i < fftSize; ++i)
-    {
-        int idx = ringPos + i;
-        if (idx >= fftSize)
-            idx -= fftSize;
-        fftBuf[(size_t) i] = { ring[(size_t) idx] * window[(size_t) i], 0.0f };
-    }
-
-    const bool frameActive = activeCount * 2 >= hop;
-    activeCount = 0;
-    hopCount = 0;
-
-    if (! frameActive || ! adapting)
-        return;
+        fftBuf[(size_t) i] = { frameBuf[(size_t) i] * window[(size_t) i], 0.0f };
 
     fft->forward (fftBuf.data());
+
     for (int k = 0; k <= fftSize / 2; ++k)
         power[(size_t) k] = std::norm (fftBuf[(size_t) k]) * psdScale;
 
@@ -338,10 +350,7 @@ void MatchEq::computeCurve (BandArray& eqDb, float& normGain) const noexcept
 
 bool MatchEq::service()
 {
-    if (! needsDesign.load() || pendingState.load() != 0)
-        return false;
-
-    // Only one thread designs at a time (the audio thread may also get here when rendering offline).
+    // Only one thread at a time (the audio thread also gets here when rendering offline).
     if (designBusy.exchange (true))
         return false;
 
@@ -350,6 +359,18 @@ bool MatchEq::service()
         std::atomic<bool>& flag;
         ~Release() { flag.store (false); }
     } release { designBusy };
+
+    if (const int cmd = command.exchange (cmdNone); cmd != cmdNone)
+        handleCommand (cmd);
+
+    if (frameState.load (std::memory_order_acquire) == 1)
+    {
+        analyseFrame();
+        frameState.store (0, std::memory_order_release);
+    }
+
+    if (! needsDesign.load() || pendingState.load (std::memory_order_acquire) != 0)
+        return false;
 
     needsDesign.store (false);
 
@@ -366,13 +387,31 @@ bool MatchEq::service()
     for (auto& c : pendingFir)
         c *= norm;
 
-    pendingState.store (1);
+    pendingState.store (1, std::memory_order_release);
     return true;
+}
+
+//==============================================================================
+// audio thread
+
+void MatchEq::installPending() noexcept
+{
+    if (pendingState.load (std::memory_order_acquire) != 1)
+        return;
+
+    // The convolution below wants the coefficients back to front.
+    const float* src = pendingFir.data();
+    float* dst = firTarget.data();
+    for (int i = 0; i < numTaps; ++i)
+        dst[i] = src[numTaps - 1 - i];
+
+    pendingState.store (0, std::memory_order_release);
+    smoothSamplesLeft = (int) (0.4 * sr);
 }
 
 void MatchEq::process (float* x, int n, bool active) noexcept
 {
-    // 1. measure what arrives from the drive stage
+    // 1. keep the recent signal around and hand complete frames to the design thread
     for (int i = 0; i < n; ++i)
     {
         ring[(size_t) ringPos] = x[i];
@@ -382,24 +421,30 @@ void MatchEq::process (float* x, int n, bool active) noexcept
 
         if (++hopCount >= hop)
         {
-            pushFrame();
+            const bool frameActive = activeCount * 2 >= hop;
+            activeCount = 0;
+            hopCount = 0;
+
+            if (frameActive && adapting && frameState.load (std::memory_order_acquire) == 0)
+            {
+                const auto first = (size_t) (fftSize - ringPos);
+                std::memcpy (frameBuf.data(), ring.data() + ringPos, sizeof (float) * first);
+                std::memcpy (frameBuf.data() + first, ring.data(), sizeof (float) * (size_t) ringPos);
+                frameState.store (1, std::memory_order_release);
+            }
+
             if (synchronous)
                 service();
         }
     }
 
-    // 2. pick up a freshly designed filter
-    if (pendingState.load (std::memory_order_acquire) == 1)
-    {
-        std::memcpy (firTarget.data(), pendingFir.data(), sizeof (float) * (size_t) numTaps);
-        pendingState.store (0, std::memory_order_release);
-        smoothBlocks = (int) (0.4 * sr);
-    }
+    // 2. pick up a freshly designed filter and glide towards it
+    installPending();
 
-    if (smoothBlocks > 0)
+    if (smoothSamplesLeft > 0)
     {
-        smoothBlocks -= n;
-        if (smoothBlocks <= 0)
+        smoothSamplesLeft -= n;
+        if (smoothSamplesLeft <= 0)
         {
             std::memcpy (firCur.data(), firTarget.data(), sizeof (float) * (size_t) numTaps);
         }
@@ -413,23 +458,14 @@ void MatchEq::process (float* x, int n, bool active) noexcept
         }
     }
 
-    // 3. convolve
+    // 3. convolve:  y[j] = sum_k  h[taps-1-k] * hist[j + k]
     float* hist = history.data();
     std::memcpy (hist + numTaps - 1, x, sizeof (float) * (size_t) n);
 
-    float* out = scratch.data();
-    std::memset (out, 0, sizeof (float) * (size_t) n);
-
     const float* h = firCur.data();
-    for (int i = 0; i < numTaps; ++i)
-    {
-        const float c = h[i];
-        const float* src = hist + (numTaps - 1 - i);
-        for (int j = 0; j < n; ++j)
-            out[j] += c * src[j];
-    }
+    for (int j = 0; j < n; ++j)
+        x[j] = dotProduct (h, hist + j, numTaps);
 
-    std::memcpy (x, out, sizeof (float) * (size_t) n);
     std::memmove (hist, hist + n, sizeof (float) * (size_t) (numTaps - 1));
 }
 

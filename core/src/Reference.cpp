@@ -611,13 +611,29 @@ ReferenceResult analyzeReference (const float* left, const float* right, size_t 
     res.ok = true;
 
     static const char* const voiceNames[] = { "Smooth", "Crunch", "Fuzz" };
-    char text[320];
-    const char* source = ! fullMix ? "Solo guitar"
-                       : prof.usedExposedGuitar ? "Full mix - used passages where the guitar plays alone"
-                       : prof.isolationPan < -0.1f ? "Full mix - guitar isolated (left)"
-                       : prof.isolationPan > 0.1f ? "Full mix - guitar isolated (right)"
-                       : "Full mix - guitar isolated from the centre (rough: select a passage where the guitar is exposed for a better match)";
+    char source[200];
 
+    if (! fullMix)
+    {
+        std::snprintf (source, sizeof (source), "Solo guitar");
+    }
+    else if (prof.usedExposedGuitar)
+    {
+        // Say where, so the user can check that it really is the guitar they meant.
+        const int a0 = (int) prof.usedStartSec, a1 = (int) std::ceil (prof.usedEndSec);
+        std::snprintf (source, sizeof (source),
+                       "Full mix - used the part where one instrument plays alone (%d:%02d-%d:%02d; Audition to check it is the guitar)",
+                       a0 / 60, a0 % 60, a1 / 60, a1 % 60);
+    }
+    else
+    {
+        std::snprintf (source, sizeof (source), "%s",
+                       prof.isolationPan < -0.1f ? "Full mix - guitar isolated (left)"
+                       : prof.isolationPan > 0.1f ? "Full mix - guitar isolated (right)"
+                       : "Full mix - guitar isolated from the centre (rough: select a part where the guitar is exposed for a better match)");
+    }
+
+    char text[320];
     std::snprintf (text, sizeof (text), "%s. Tone: %s, drive %d%%.", source,
                    voiceNames[std::clamp (prof.voicing, 0, 2)], (int) std::lround (prof.drive * 100.0f));
     res.message = text;

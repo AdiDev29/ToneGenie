@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 
 # Build for both Apple Silicon and Intel by default, and run on older macOS versions.
-# (Must be set before project().)
+# (Must be set before project(), where APPLE is not defined yet - hence CMAKE_HOST_APPLE.)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum macOS version")
-if(APPLE AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+if(CMAKE_HOST_APPLE AND NOT DEFINED CMAKE_OSX_ARCHITECTURES)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures")
 endif()
 
@@ -26,7 +26,7 @@ endif()
 option(TONEGENIE_BUILD_PLUGIN "Build the audio plugin (downloads JUCE)" ON)
 option(TONEGENIE_BUILD_TESTS "Build the test suite" ON)
 option(TONEGENIE_BUILD_TOOLS "Build the command-line tool" ON)
-option(TONEGENIE_BUILD_CLAP "Also build a CLAP plugin (downloads clap-juce-extensions)" ON)
+option(TONEGENIE_BUILD_CLAP "Also build a CLAP plugin (downloads clap-juce-extensions)" OFF)
 option(TONEGENIE_COPY_AFTER_BUILD "Install the plugins into the user's plugin folders after building" OFF)
 
 #===============================================================================

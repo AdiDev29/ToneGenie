@@ -11,6 +11,9 @@
 
 #include <tonegenie/Analysis.h>
 
+#include <cstdio>
+#include <thread>
+
 namespace
 {
 

@@ -40,7 +40,9 @@ Getting the best match from a full song:
 - **Audition** plays the guitar signal the tone was taken from. If you can hear a lot of
   other instruments in it, pick a different passage or tell ToneGenie where the guitar
   sits with **Guitar sits: Left / Centre / Right**.
-- **File is** overrides the automatic guitar-only / full-song decision.
+- **File is** overrides the automatic guitar-only / full-song decision. If ToneGenie
+  picked an "exposed" passage that is not actually the guitar (a piano intro, say), choose
+  *Full song* to make it separate the guitar from the mix instead, or select the right part.
 - All pedal controls stay live: if the detected drive is not quite right, turn the knob.
 - **Re-learn guitar** after swapping instruments or pickups.
 
@@ -57,7 +59,7 @@ Getting the best match from a full song:
 
 ## Downloads and installation
 
-Every push is built by GitHub Actions for:
+The GitHub Actions workflow in this repository builds, tests and packages:
 
 | Platform | CPU | Formats |
 | --- | --- | --- |
@@ -107,7 +109,7 @@ recordings.
 ## Building from source
 
 Requirements: CMake 3.22+, a C++17 compiler (Xcode 12+, Visual Studio 2022, GCC 9+ or
-Clang 10+). JUCE and clap-juce-extensions are downloaded automatically at configure time.
+Clang 10+). JUCE is downloaded automatically at configure time.
 
 On Linux first install the development packages:
 
@@ -134,7 +136,7 @@ The plugins end up in `build/plugin/ToneGenie_artefacts/Release/`. Useful option
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `TONEGENIE_BUILD_PLUGIN` | `ON` | Build the plugin (off = DSP core, CLI and tests only, no downloads) |
-| `TONEGENIE_BUILD_CLAP` | `ON` | Also build the CLAP format |
+| `TONEGENIE_BUILD_CLAP` | `OFF` | Also build the CLAP format (downloads clap-juce-extensions; the CI builds turn this on) |
 | `TONEGENIE_BUILD_AAX` | `OFF` | Also build AAX (needs Avid signing to be loadable) |
 | `TONEGENIE_COPY_AFTER_BUILD` | `OFF` | Install the plugins into your user plugin folders after building |
 | `CMAKE_OSX_ARCHITECTURES` | `arm64;x86_64` | macOS architectures |
@@ -157,14 +159,17 @@ core/      DSP library, plain C++17, no dependencies
   FrontEnd    input leveler, pickup compensation, gate, compressor, oversampled drive
   MatchEq     adaptive minimum-phase matching EQ
   ToneEngine  the complete real-time effect
+  Simd        SSE2 / NEON dot product used by the FIR filters
 plugin/    JUCE plugin: parameters, state, background analysis, editor
 tools/     command-line tool
 tests/     core test suite and an end-to-end test of the plugin class
 ```
 
-Real-time notes: the audio thread never allocates or locks. Filter design for the
-matching EQ runs on a helper thread and is handed over through atomics; reported latency
-is 32 samples (the oversampler), and the matching EQ itself is minimum-phase and adds none.
+Real-time notes: the audio thread never allocates or locks - it only filters and passes
+data through atomics. Spectrum analysis and filter design for the matching EQ run on a
+helper thread. CPU use is about 1.5 % of one core at 48 kHz (measured on a desktop x86-64
+machine). Reported latency is 32 samples (the oversampler); the matching EQ itself is
+minimum-phase and adds none.
 
 ## Licensing note
 

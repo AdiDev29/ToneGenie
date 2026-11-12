@@ -39,9 +39,10 @@ private:
     profile; a broad, slowly adapting correction on top compensates for the
     instrument actually being played.
 
-    Threading: process() and the setters run on the audio thread. service()
-    does the heavy filter design and may run on any other thread; the two
-    sides only exchange data through atomics. */
+    Threading: process() and the setters run on the audio thread and do
+    nothing but buffer, convolve and flip atomics. All spectral analysis and
+    filter design happens in service(), which runs on a helper thread (or
+    inside process() in synchronous mode, for offline rendering and tests). */
 class MatchEq
 {
 public:
@@ -64,13 +65,18 @@ public:
     /** Forget what was learned about the instrument and start again. */
     void relearn() noexcept;
 
-    /** When true the filter design runs inside process() (offline rendering, tests). */
+    /** Restores a previously learned instrument spectrum. */
+    void setMeasured (const BandArray& db, float weightFrames) noexcept;
+
+    /** When true the analysis and filter design run inside process(). */
     void setSynchronous (bool sync) noexcept { synchronous = sync; }
 
     /** In-place, n <= kMaxChunk. `active` says whether the player is playing. */
     void process (float* x, int n, bool active) noexcept;
 
-    /** Non-realtime work. Returns true if a new filter was designed. */
+    /** Non-realtime work: analyses a waiting frame, redesigns the filter if
+        needed. Returns true if a new filter was designed. Safe to call from
+        any one thread at a time (concurrent calls simply return). */
     bool service();
 
     /** Designs and installs the filter immediately, without cross-fading.
@@ -79,48 +85,55 @@ public:
 
     // --- state / display (any thread) ----------------------------------------
     void getMeasured (BandArray& db, float& weightFrames) const noexcept;
-    void setMeasured (const BandArray& db, float weightFrames) noexcept; // audio thread
     void getDisplay (BandArray& targetDb, BandArray& outputDb, BandArray& eqDb) const noexcept;
 
     static constexpr float kOutputPower = 0.01f; ///< -20 dBFS RMS while playing
 
 private:
-    void pushFrame() noexcept;
+    enum Command { cmdNone = 0, cmdRelearn = 1, cmdRestore = 2 };
+
+    void handleCommand (int cmd) noexcept;
+    void analyseFrame() noexcept;
     void publishMeasured() noexcept;
     void computeCurve (BandArray& eqDb, float& normGain) const noexcept;
+    void installPending() noexcept;
 
     double sr = 44100.0;
     int numTaps = 1024;
-
-    // analysis
     int fftSize = 4096, hop = 2048;
-    std::unique_ptr<Fft> fft;
-    BandMapper mapper, designMapper;
-    std::vector<float> window, ring, power;
-    std::vector<std::complex<float>> fftBuf;
+    float priorWeight = 30.0f, maxWeight = 400.0f;
+
+    // --- audio thread -------------------------------------------------------------
+    std::vector<float> ring;
     int ringPos = 0, hopCount = 0, activeCount = 0;
-    float psdScale = 1.0f;
-
-    BandArray avgPsd {};
-    float weight = 0.0f, maxWeight = 400.0f;
     bool adapting = true, synchronous = false;
+    std::vector<float> firCur, firTarget;   ///< stored reversed, see process()
+    std::vector<float> history;
+    int smoothSamplesLeft = 0;
 
-    // shared with the design thread
-    std::array<std::atomic<float>, kNumBands> sharedMeasuredDb, sharedTargetDb, sharedExpectedDb, sharedEqDb;
-    std::atomic<float> sharedWeight { 0.0f }, sharedAmount { 1.0f }, sharedValidLo { 60.0f }, sharedValidHi { 16000.0f };
-    std::atomic<bool> hasTarget { false };
+    // --- hand-over between the threads ----------------------------------------------
+    std::vector<float> frameBuf;             ///< audio -> design, guarded by frameState
+    std::atomic<int> frameState { 0 };       ///< 0 free, 1 holds a frame
+    std::vector<float> pendingFir;           ///< design -> audio, guarded by pendingState
+    std::atomic<int> pendingState { 0 };     ///< 0 free, 1 holds a filter
+    std::atomic<int> command { cmdNone };
     std::atomic<bool> needsDesign { true };
     std::atomic<bool> designBusy { false };
-    std::atomic<int> pendingState { 0 };
+    std::atomic<bool> hasTarget { false };
 
-    // design side
+    std::array<std::atomic<float>, kNumBands> sharedMeasuredDb, sharedRestoreDb, sharedTargetDb, sharedExpectedDb, sharedEqDb;
+    std::atomic<float> sharedWeight { 0.0f }, sharedRestoreWeight { 0.0f };
+    std::atomic<float> sharedAmount { 1.0f }, sharedValidLo { 60.0f }, sharedValidHi { 16000.0f };
+
+    // --- design thread ----------------------------------------------------------------
+    std::unique_ptr<Fft> fft;
+    BandMapper mapper, designMapper;
     MinPhaseDesigner designer;
-    std::vector<float> binDb, pendingFir;
-
-    // filter
-    std::vector<float> firCur, firTarget, history, scratch;
-    int smoothBlocks = 0;
-    float smoothCoeff = 0.1f;
+    std::vector<float> window, power, binDb;
+    std::vector<std::complex<float>> fftBuf;
+    float psdScale = 1.0f;
+    BandArray avgPsd {};
+    float weight = 0.0f;
 };
 
 } // namespace tg

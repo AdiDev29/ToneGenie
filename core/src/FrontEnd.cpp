@@ -1,4 +1,5 @@
 #include "tonegenie/FrontEnd.h"
+#include "tonegenie/Simd.h"
 
 #include <cstring>
 
@@ -41,11 +42,13 @@ Oversampler4x::Oversampler4x()
     for (int i = 0; i < kTaps; ++i)
         h[i] = (float) (proto[i] / sum);
 
+    // Branch p of the interpolator uses taps h[p], h[p+4], ... Stored back to
+    // front so the filter is a plain forward dot product over the input history.
     for (int p = 0; p < kFactor; ++p)
         for (int k = 0; k < kPhaseTaps; ++k)
         {
             const int idx = kFactor * k + p;
-            phase[p][k] = idx < kTaps ? h[idx] * (float) kFactor : 0.0f;
+            phaseRev[p][kPhaseTaps - 1 - k] = idx < kTaps ? h[idx] * (float) kFactor : 0.0f;
         }
 
     reset();
@@ -64,15 +67,9 @@ void Oversampler4x::up (const float* in, float* out, int n) noexcept
 
     for (int j = 0; j < n; ++j)
     {
-        const float* x = upBuf + hist + j;
+        const float* x = upBuf + j; // oldest of the kPhaseTaps samples ending at input j
         for (int p = 0; p < kFactor; ++p)
-        {
-            const float* c = phase[p];
-            float acc = 0.0f;
-            for (int k = 0; k < kPhaseTaps; ++k)
-                acc += c[k] * x[-k];
-            out[kFactor * j + p] = acc;
-        }
+            out[kFactor * j + p] = dotProduct (phaseRev[p], x, kPhaseTaps);
     }
 
     std::memmove (upBuf, upBuf + n, sizeof (float) * (size_t) hist);
@@ -83,14 +80,9 @@ void Oversampler4x::down (const float* in, float* out, int n) noexcept
     constexpr int hist = kTaps - 1;
     std::memcpy (downBuf + hist, in, sizeof (float) * (size_t) (kFactor * n));
 
+    // h is symmetric, so it can run forwards over the history as it is.
     for (int j = 0; j < n; ++j)
-    {
-        const float* x = downBuf + hist + kFactor * j;
-        float acc = 0.0f;
-        for (int i = 0; i < kTaps; ++i)
-            acc += h[i] * x[-i];
-        out[j] = acc;
-    }
+        out[j] = dotProduct (h, downBuf + kFactor * j, kTaps);
 
     std::memmove (downBuf, downBuf + kFactor * n, sizeof (float) * (size_t) hist);
 }
