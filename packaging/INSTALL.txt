@@ -1,0 +1,40 @@
+ToneGenie - installation
+========================
+
+Copy the plugin format(s) your DAW uses into the folders below, then rescan
+plugins in the DAW. ToneGenie appears as an effect ("ToneGenie", category
+Distortion). Put it on a track with a clean (DI) guitar.
+
+Which format do I need?
+  VST3        Ableton Live, Cubase/Nuendo, FL Studio, Studio One, REAPER, Bitwig,
+              Cakewalk, Reason, Tracktion Waveform, Ardour ...
+  AU          Logic Pro, GarageBand, MainStage (macOS only)
+  CLAP        Bitwig, REAPER, FL Studio, Studio One (newer versions)
+  LV2         Ardour, Carla, Mixbus (Linux)
+  Standalone  No DAW needed: runs as an app using your audio interface.
+
+macOS (one universal build for Apple Silicon and Intel)
+  ToneGenie.vst3        ->  ~/Library/Audio/Plug-Ins/VST3/
+  ToneGenie.component   ->  ~/Library/Audio/Plug-Ins/Components/
+  ToneGenie.clap        ->  ~/Library/Audio/Plug-Ins/CLAP/
+  ToneGenie.app         ->  /Applications/
+
+  These builds are not notarised by Apple. After copying, remove the download
+  quarantine flag once, in Terminal, for each item you installed, e.g.:
+
+      xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/ToneGenie.vst3
+
+Windows (x64 and ARM64 builds are separate downloads)
+  ToneGenie.vst3   ->  C:\Program Files\Common Files\VST3\
+  ToneGenie.clap   ->  C:\Program Files\Common Files\CLAP\
+  ToneGenie.exe    ->  anywhere
+
+Linux (x86_64 and aarch64 builds are separate downloads)
+  ToneGenie.vst3   ->  ~/.vst3/
+  ToneGenie.lv2    ->  ~/.lv2/
+  ToneGenie.clap   ->  ~/.clap/
+  ToneGenie        ->  anywhere (chmod +x if needed)
+
+Command-line tool
+  tonegenie-cli analyses a reference WAV and renders a clean guitar WAV through
+  the learned tone without a DAW. Run it without arguments for help.

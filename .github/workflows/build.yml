@@ -1,0 +1,153 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon + Intel)
+            os: macos-14
+            artifact: ToneGenie-macOS-universal
+            pluginval: pluginval_macOS.zip
+          - name: Windows x64
+            os: windows-2022
+            artifact: ToneGenie-Windows-x64
+            pluginval: pluginval_Windows.zip
+          - name: Windows ARM64
+            os: windows-11-arm
+            artifact: ToneGenie-Windows-arm64
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            artifact: ToneGenie-Linux-x86_64
+            pluginval: pluginval_Linux.zip
+          - name: Linux aarch64
+            os: ubuntu-22.04-arm
+            artifact: ToneGenie-Linux-aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb fonts-dejavu-core
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a ctest --test-dir build -C Release --output-on-failure --timeout 1200
+          else
+            ctest --test-dir build -C Release --output-on-failure --timeout 1200
+          fi
+
+      - name: Validate the VST3 with pluginval
+        if: matrix.pluginval
+        shell: bash
+        run: |
+          curl -sSL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/latest/download/${{ matrix.pluginval }}"
+          VST3="build/plugin/ToneGenie_artefacts/Release/VST3/ToneGenie.vst3"
+          ARGS="--strictness-level 8 --validate-in-process --timeout-ms 600000 --validate"
+          case "$RUNNER_OS" in
+            Linux)   unzip -q pluginval.zip && xvfb-run -a ./pluginval $ARGS "$VST3" ;;
+            macOS)   unzip -q pluginval.zip && ./pluginval.app/Contents/MacOS/pluginval $ARGS "$VST3" ;;
+            Windows) 7z x -y pluginval.zip > /dev/null && ./pluginval.exe $ARGS "$VST3" ;;
+          esac
+
+      - name: Validate the Audio Unit with auval
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/plugin/ToneGenie_artefacts/Release/AU/ToneGenie.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -v aufx Tgn1 Tngn
+
+      - name: Package
+        shell: bash
+        run: |
+          ART="build/plugin/ToneGenie_artefacts/Release"
+          OUT="${{ matrix.artifact }}"
+          mkdir -p "$OUT"
+
+          cp -R "$ART/VST3/ToneGenie.vst3" "$OUT/"
+          if [ -d "$ART/AU/ToneGenie.component" ]; then cp -R "$ART/AU/ToneGenie.component" "$OUT/"; fi
+          if [ -d "$ART/LV2/ToneGenie.lv2" ]; then cp -R "$ART/LV2/ToneGenie.lv2" "$OUT/"; fi
+
+          CLAP="$(find build -name 'ToneGenie.clap' -not -path '*/CMakeFiles/*' | head -n 1)"
+          if [ -n "$CLAP" ]; then cp -R "$CLAP" "$OUT/"; fi
+
+          for app in "$ART/Standalone/ToneGenie.app" "$ART/Standalone/ToneGenie.exe" "$ART/Standalone/ToneGenie"; do
+            if [ -e "$app" ]; then cp -R "$app" "$OUT/"; fi
+          done
+
+          CLI="$(find build -maxdepth 2 \( -name 'tonegenie-cli' -o -name 'tonegenie-cli.exe' \) -type f | head -n 1)"
+          if [ -n "$CLI" ]; then cp "$CLI" "$OUT/"; fi
+
+          cp packaging/INSTALL.txt "$OUT/"
+          ls -la "$OUT"
+
+          case "$RUNNER_OS" in
+            macOS)
+              # Unsigned builds still need an ad-hoc signature to load on Apple Silicon.
+              for bundle in "$OUT"/*.vst3 "$OUT"/*.component "$OUT"/*.clap "$OUT"/*.app; do
+                if [ -e "$bundle" ]; then codesign --force --deep --sign - "$bundle"; fi
+              done
+              ditto -c -k --keepParent "$OUT" "$OUT.zip" ;;
+            Windows)
+              7z a -tzip "$OUT.zip" "$OUT" > /dev/null ;;
+            Linux)
+              tar czf "$OUT.tar.gz" "$OUT" ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --repo "$GITHUB_REPOSITORY" --title "ToneGenie $GITHUB_REF_NAME" --generate-notes
