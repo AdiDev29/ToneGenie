@@ -322,7 +322,7 @@ IsolationResult isolateGuitar (const float* left, const float* right, size_t num
             sum += hist[i];
         }
 
-        const auto panOf = [] (int i) { return 2.0f * (float) i / (float) (hbins - 1) - 1.0f; };
+        const auto panOf = [&] (int i) { return 2.0f * (float) i / (float) (hbins - 1) - 1.0f; };
 
         int best = -1;
         for (int i = 0; i < hbins; ++i)
