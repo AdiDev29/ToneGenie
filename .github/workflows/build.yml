@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon + Intel)
-            os: macos-14
+            os: macos-latest
             artifact: ToneGenie-macOS-universal
             pluginval: pluginval_macOS.zip
           - name: Windows x64
