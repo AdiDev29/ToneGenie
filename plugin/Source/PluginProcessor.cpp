@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cstring>
+
 namespace
 {
     juce::NormalisableRange<float> skewedRange (float lo, float hi, float centre)
@@ -176,8 +178,10 @@ void ToneGenieProcessor::process (juce::AudioBuffer<float>& buffer, bool bypasse
     if (relearnRequested.exchange (false))
         engine.relearn();
 
+    const bool offline = isNonRealtime();
+    designThread.offline.store (offline, std::memory_order_relaxed);
     engine.setParams (readParams (bypassed));
-    engine.setSynchronous (isNonRealtime());
+    engine.setSynchronous (offline);
 
     // --- the effect -----------------------------------------------------------------
     const float* inL = numIn > 0 ? buffer.getReadPointer (0) : nullptr;

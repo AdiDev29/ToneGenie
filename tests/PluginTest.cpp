@@ -297,6 +297,31 @@ void runTests (const juce::String& screenshotPath)
         CHECK_MSG (err < 2.5f, "restored instance spectrum error %.2f dB", err);
         CHECK_MSG (proc->getInputTrimDb() > 6.0f, "restored trim %.1f dB", proc->getInputTrimDb());
 
+        // A state restore while an analysis is running wins: the stale result must be dropped.
+        {
+            const float restoredDrive = proc->apvts.getRawParameterValue (ParamIDs::drive)->load();
+            proc->apvts.getParameter (ParamIDs::drive)->setValueNotifyingHost (0.05f);
+            juce::MemoryBlock cleanState;
+            proc->getStateInformation (cleanState);
+
+            ReferenceSettings guitarOnly;
+            guitarOnly.sourceMode = 1; // would produce a different profile and move the knobs
+            onMessageThread ([&] { proc->loadReference (songFile, guitarOnly); });
+            CHECK (proc->reference.isBusy());
+            proc->setStateInformation (cleanState.getData(), (int) cleanState.getSize());
+            CHECK (! proc->reference.isBusy());
+
+            juce::Thread::sleep (6000); // longer than the analysis would have taken
+            onMessageThread ([] {});
+
+            const auto after = proc->reference.getSnapshot();
+            CHECK_MSG (std::abs (proc->apvts.getRawParameterValue (ParamIDs::drive)->load() - 5.0f) < 0.01f,
+                       "drive is %.1f after a superseded analysis (restored state had 5.0, earlier %.1f)",
+                       proc->apvts.getRawParameterValue (ParamIDs::drive)->load(), restoredDrive);
+            CHECK (after.hasProfile && after.profile.fromFullMix);
+            CHECK (after.status == snap.status);
+        }
+
         // garbage state must be ignored, not crash
         const char junk[] = "this is not a ToneGenie state";
         proc->setStateInformation (junk, (int) sizeof (junk));

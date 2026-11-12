@@ -61,7 +61,6 @@ public:
 private:
     void run() override;
     void handleAsyncUpdate() override;
-    void setStatus (const juce::String& text);
 
     Listener& listener;
 
@@ -72,6 +71,8 @@ private:
     tg::ReferenceResult finished;        // guarded by lock
     bool hasFinished = false;            // guarded by lock
 
+    std::atomic<int> generation { 0 };   ///< bumped whenever a running job's result becomes unwanted
+    int finishedGeneration = -1;         // guarded by lock
     std::atomic<int> revision { 0 };
     std::atomic<bool> busy { false };
     std::atomic<float> progress { 0.0f };

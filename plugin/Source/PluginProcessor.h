@@ -96,10 +96,15 @@ private:
         {
             while (! threadShouldExit())
             {
-                engine.serviceBackground();
+                // When rendering offline the audio thread does this work itself,
+                // in step with the audio, so that bounces are reproducible.
+                if (! offline.load (std::memory_order_relaxed))
+                    engine.serviceBackground();
                 wait (12);
             }
         }
+
+        std::atomic<bool> offline { false };
 
     private:
         tg::ToneEngine& engine;

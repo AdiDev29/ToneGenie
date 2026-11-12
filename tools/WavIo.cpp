@@ -55,11 +55,11 @@ bool readWav (const std::string& path, WavData& out, std::string& error)
 
     for (size_t pos = 12; pos + 8 <= bytes.size();)
     {
-        const auto size = (size_t) readLe<uint32_t> (&bytes[pos + 4]);
-        const auto* body = &bytes[pos + 8];
+        const auto size = (size_t) readLe<uint32_t> (bytes.data() + pos + 4);
+        const auto* body = bytes.data() + pos + 8;
         const size_t avail = std::min (size, bytes.size() - pos - 8);
 
-        if (std::memcmp (&bytes[pos], "fmt ", 4) == 0 && avail >= 16)
+        if (std::memcmp (bytes.data() + pos, "fmt ", 4) == 0 && avail >= 16)
         {
             format = readLe<uint16_t> (body);
             numChannels = readLe<uint16_t> (body + 2);
@@ -68,7 +68,7 @@ bool readWav (const std::string& path, WavData& out, std::string& error)
             if (format == 0xfffe && avail >= 26) // WAVE_FORMAT_EXTENSIBLE
                 format = readLe<uint16_t> (body + 24);
         }
-        else if (std::memcmp (&bytes[pos], "data", 4) == 0)
+        else if (std::memcmp (bytes.data() + pos, "data", 4) == 0)
         {
             data = body;
             dataSize = avail;

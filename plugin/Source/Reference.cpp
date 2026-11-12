@@ -1,5 +1,7 @@
 #include "Reference.h"
 
+#include <cstring>
+
 namespace
 {
     constexpr double maxFileMinutes = 12.0;
@@ -66,15 +68,6 @@ bool ReferenceManager::isSupportedFile (const juce::File& file)
     return file.existsAsFile() && formats.findFormatForFileExtension (file.getFileExtension()) != nullptr;
 }
 
-void ReferenceManager::setStatus (const juce::String& text)
-{
-    {
-        const juce::ScopedLock sl (lock);
-        snapshot.status = text;
-    }
-    ++revision;
-}
-
 void ReferenceManager::analyse (const juce::File& file, const ReferenceSettings& settings)
 {
     stopThread (15000);
@@ -82,6 +75,7 @@ void ReferenceManager::analyse (const juce::File& file, const ReferenceSettings&
 
     {
         const juce::ScopedLock sl (lock);
+        ++generation;
         hasFinished = false;
         jobFile = file;
         jobSettings = settings;
@@ -111,6 +105,7 @@ void ReferenceManager::clear()
 
     {
         const juce::ScopedLock sl (lock);
+        ++generation;
         snapshot = ReferenceSnapshot();
         snapshot.status = "Drop an audio file here, or click Load, to capture its guitar tone.";
         hasFinished = false;
@@ -130,16 +125,24 @@ void ReferenceManager::run()
 {
     juce::File file;
     ReferenceSettings settings;
+    int job = 0;
     {
         const juce::ScopedLock sl (lock);
         file = jobFile;
         settings = jobSettings;
+        job = generation.load();
     }
 
-    const auto fail = [this] (const juce::String& message)
+    // Anything this job reports is dropped if it has been superseded meanwhile
+    // (a new file, Clear, or the host restoring a saved state).
+    const auto fail = [this, job] (const juce::String& message)
     {
+        const juce::ScopedLock sl (lock);
+        if (job != generation.load())
+            return;
         busy.store (false);
-        setStatus (message);
+        snapshot.status = message;
+        ++revision;
     };
 
     // --- decode ---------------------------------------------------------------
@@ -195,6 +198,8 @@ void ReferenceManager::run()
         }
 
         const juce::ScopedLock sl (lock);
+        if (job != generation.load())
+            return;
         snapshot.thumbMin = std::move (mn);
         snapshot.thumbMax = std::move (mx);
         snapshot.duration = numSamples / sampleRate;
@@ -212,13 +217,13 @@ void ReferenceManager::run()
     options.regionStartSec = settings.regionStart;
     options.regionEndSec = settings.regionEnd;
 
-    auto result = tg::analyzeReference (left, right, (size_t) numSamples, sampleRate, options, [this] (float p)
+    auto result = tg::analyzeReference (left, right, (size_t) numSamples, sampleRate, options, [this, job] (float p)
     {
         progress.store (p);
-        return ! threadShouldExit();
+        return ! threadShouldExit() && job == generation.load();
     });
 
-    if (threadShouldExit())
+    if (threadShouldExit() || job != generation.load())
         return;
 
     if (truncated && result.ok)
@@ -226,7 +231,10 @@ void ReferenceManager::run()
 
     {
         const juce::ScopedLock sl (lock);
+        if (job != generation.load())
+            return;
         finished = std::move (result);
+        finishedGeneration = job;
         hasFinished = true;
     }
 
@@ -244,6 +252,9 @@ void ReferenceManager::handleAsyncUpdate()
         hasFinished = false;
         result = std::move (finished);
         finished = {};
+
+        if (finishedGeneration != generation.load())
+            return; // superseded while the completion message was in flight
 
         snapshot.status = result.message.empty() ? juce::String ("Analysis failed.") : juce::String (result.message);
         if (result.ok)
@@ -379,9 +390,14 @@ bool ReferenceManager::fromValueTree (const juce::ValueTree& tree, tg::ToneProfi
     }
 
     {
+        // A restored state replaces whatever an analysis in flight would have produced.
         const juce::ScopedLock sl (lock);
+        ++generation;
+        hasFinished = false;
         snapshot = s;
     }
+    signalThreadShouldExit();
+    busy.store (false);
     ++revision;
 
     profileOut = s.profile;
