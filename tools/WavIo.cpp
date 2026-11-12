@@ -128,6 +128,13 @@ bool writeWav (const std::string& path, const WavData& data, std::string& error)
         return false;
     }
 
+    const uint64_t payload = (uint64_t) data.numSamples() * data.channels.size() * 3u;
+    if (payload > 0xffffffffull - 36u || data.channels.size() > 0xffff)
+    {
+        error = "audio is too long for a WAV file: " + path;
+        return false;
+    }
+
     const auto numChannels = (uint16_t) data.channels.size();
     const auto frames = (uint32_t) data.numSamples();
     const uint32_t dataBytes = frames * numChannels * 3u;

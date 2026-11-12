@@ -178,18 +178,34 @@ bool ToneFitter::fit (ToneProfile& profile, const ProgressFn& progress) const
                 if (job >= numJobs || cancelled.load())
                     return;
 
-                results[(size_t) job] = eval (job / gridSize, grid[job % gridSize], 0.0f);
+                try
+                {
+                    results[(size_t) job] = eval (job / gridSize, grid[job % gridSize], 0.0f);
 
-                const std::lock_guard<std::mutex> lock (progressLock);
-                if (! report())
+                    const std::lock_guard<std::mutex> lock (progressLock);
+                    if (! report())
+                        cancelled.store (true);
+                }
+                catch (...)
+                {
+                    // out of memory etc.: give up cleanly instead of terminating the host
                     cancelled.store (true);
+                    return;
+                }
             }
         };
 
         const int numThreads = (int) std::clamp (std::thread::hardware_concurrency(), 1u, 4u);
         std::vector<std::thread> threads;
-        for (int i = 1; i < numThreads; ++i)
-            threads.emplace_back (worker);
+        try
+        {
+            for (int i = 1; i < numThreads; ++i)
+                threads.emplace_back (worker);
+        }
+        catch (...)
+        {
+            // could not start (more) threads: the ones we have, plus this one, do the work
+        }
         worker();
         for (auto& t : threads)
             t.join();
@@ -203,10 +219,13 @@ bool ToneFitter::fit (ToneProfile& profile, const ProgressFn& progress) const
     }
 
     // refine the drive around the best grid point
+    const float centre = best.drive;
+    const int centreVoicing = best.voicing;
+
     for (float delta : { -0.075f, 0.075f })
     {
-        const float d = std::clamp (best.drive + delta, 0.0f, 1.0f);
-        const auto c = eval (best.voicing, d, 0.0f);
+        const float d = std::clamp (centre + delta, 0.0f, 1.0f);
+        const auto c = eval (centreVoicing, d, 0.0f);
         if (c.distance < best.distance)
             best = c;
         if (! report())

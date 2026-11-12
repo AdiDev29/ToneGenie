@@ -149,6 +149,9 @@ The plugins end up in `build/plugin/ToneGenie_artefacts/Release/`. Useful option
 ./build/tonegenie-cli process reference.wav clean-guitar.wav output.wav --isolated what-it-heard.wav
 ```
 
+With Visual Studio (or the Xcode generator) the tool is in a per-configuration folder:
+`build\Release\tonegenie-cli.exe`.
+
 ## Project layout
 
 ```

@@ -4,6 +4,32 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <tonegenie/Reference.h>
 
+#include <cmath>
+
+/** Decodes a block of floats saved with MemoryBlock::toBase64Encoding ("<bytes>.<data>").
+    The declared size is checked first, so damaged state data cannot trigger a huge allocation. */
+inline bool decodeFloatBlock (const juce::String& text, size_t minFloats, size_t maxFloats, juce::MemoryBlock& block)
+{
+    const auto prefix = text.upToFirstOccurrenceOf (".", false, false);
+    if (prefix.isEmpty() || prefix.length() == text.length() || prefix.length() > 9 || ! prefix.containsOnly ("0123456789"))
+        return false;
+
+    const auto bytes = (size_t) prefix.getLargeIntValue();
+    if (bytes % sizeof (float) != 0 || bytes < minFloats * sizeof (float) || bytes > maxFloats * sizeof (float))
+        return false;
+
+    return block.fromBase64Encoding (text) && block.getSize() == bytes;
+}
+
+/** True if every value is a plausible level in dB (finite and within sane bounds). */
+inline bool allPlausibleDb (const float* data, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+        if (! (std::isfinite (data[i]) && data[i] >= -250.0f && data[i] <= 100.0f))
+            return false;
+    return true;
+}
+
 /** How the user wants the reference file to be treated. */
 struct ReferenceSettings
 {
@@ -45,6 +71,10 @@ public:
     /** Forgets the reference tone. */
     void clear();
 
+    /** Stops the analysis and guarantees that no further callback reaches the
+        listener. Call before the listener starts being destroyed. Any thread. */
+    void shutdown();
+
     ReferenceSnapshot getSnapshot() const;
     int getRevision() const noexcept { return revision.load(); }
     bool isBusy() const noexcept { return busy.load(); }
@@ -63,6 +93,9 @@ private:
     void handleAsyncUpdate() override;
 
     Listener& listener;
+
+    juce::CriticalSection callbackLock;  ///< held while a completion callback runs
+    bool dead = false;                   // guarded by callbackLock
 
     mutable juce::CriticalSection lock;
     ReferenceSnapshot snapshot;          // guarded by lock

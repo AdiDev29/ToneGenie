@@ -143,7 +143,9 @@ Knob::Knob (juce::AudioProcessorValueTreeState& state, const juce::String& param
     // Friendlier number formatting than the parameter's default.
     slider.textFromValueFunction = [suffix, decimals] (double v)
     {
-        return juce::String (v, decimals) + (suffix.isEmpty() ? juce::String() : " " + suffix);
+        // (juce::String (v, 0) does not round to a whole number)
+        return (decimals > 0 ? juce::String (v, decimals) : juce::String (juce::roundToInt (v)))
+             + (suffix.isEmpty() ? juce::String() : " " + suffix);
     };
     slider.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("0123456789.-+").getDoubleValue(); };
     slider.updateText();

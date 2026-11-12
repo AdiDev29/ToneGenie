@@ -349,7 +349,14 @@ void ToneGenieEditor::refreshFromReference()
 {
     const auto snap = genie.reference.getSnapshot();
 
-    currentFile = snap.filePath.isNotEmpty() ? juce::File (snap.filePath) : juce::File();
+    // The path may come from a project saved on another operating system.
+    const bool usablePath = juce::File::isAbsolutePath (snap.filePath)
+                           #if ! JUCE_WINDOWS
+                            && ! snap.filePath.containsChar ('\\')
+                           #endif
+                            ;
+    currentFile = usablePath ? juce::File (snap.filePath) : juce::File();
+    const auto displayName = snap.filePath.substring (juce::jmax (snap.filePath.lastIndexOfChar ('/'), snap.filePath.lastIndexOfChar ('\\')) + 1);
     regionStart = snap.settings.regionStart;
     regionEnd = snap.settings.regionEnd;
 
@@ -358,8 +365,8 @@ void ToneGenieEditor::refreshFromReference()
     focusBox.setSelectedId (snap.settings.focus + 1, juce::dontSendNotification);
     updatingBoxes = false;
 
-    fileLabel.setText (currentFile != juce::File() ? currentFile.getFileName() : juce::String ("No reference loaded"), juce::dontSendNotification);
-    fileLabel.setColour (juce::Label::textColourId, currentFile != juce::File() ? Theme::text : Theme::dim);
+    fileLabel.setText (displayName.isNotEmpty() ? displayName : juce::String ("No reference loaded"), juce::dontSendNotification);
+    fileLabel.setColour (juce::Label::textColourId, displayName.isNotEmpty() ? Theme::text : Theme::dim);
     statusLabel.setText (snap.status, juce::dontSendNotification);
 
     waveform.setWaveform (snap.thumbMin, snap.thumbMax, snap.duration);

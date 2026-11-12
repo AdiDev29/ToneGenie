@@ -104,10 +104,18 @@ void Reverb::process (const float* in, float* outL, float* outR, int n) noexcept
 {
     if (mixTarget <= 0.0f && mixCur <= 0.0f)
     {
+        if (! idle)
+        {
+            reset(); // drop the tail so it cannot come back when the reverb is turned up again
+            idle = true;
+        }
+
         for (int i = 0; i < n; ++i)
             outL[i] = outR[i] = in[i];
         return;
     }
+
+    idle = false;
 
     const float mixStep = (mixTarget - mixCur) / (float) n;
     // Keeps the reverb level roughly independent of the decay time.
@@ -175,6 +183,8 @@ void ToneEngine::prepare (double sampleRate)
     dryL.prepare (latencySamples() + kMaxChunk);
     dryR.prepare (latencySamples() + kMaxChunk);
     setParams (params);
+    delay.snap();
+    front.snapSmoothers();
     mixCur = params.mix;
     outCur = dbToGain (params.outputDb);
 }
@@ -260,8 +270,10 @@ void ToneEngine::process (const float* inL, const float* inR, float* outL, float
 
         for (int i = 0; i < n; ++i)
         {
-            const float l = inL[pos + i];
-            const float r = inR != nullptr ? inR[pos + i] : l;
+            // One NaN from an upstream plugin must not poison the filters for good.
+            const auto clean = [] (float v) noexcept { return std::isfinite (v) ? std::clamp (v, -64.0f, 64.0f) : 0.0f; };
+            const float l = clean (inL[pos + i]);
+            const float r = inR != nullptr ? clean (inR[pos + i]) : l;
             mono[i] = 0.5f * (l + r);
 
             // latency-compensated dry path

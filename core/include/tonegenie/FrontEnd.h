@@ -135,6 +135,7 @@ public:
     void process (float* x, int n) noexcept;
 
     static float gainDbFor (int voicing, float drive01) noexcept;
+    void snap() noexcept { gainCur = gainTarget; }
 
 private:
     struct Voice
@@ -169,6 +170,8 @@ public:
 
     /** In-place, n <= kMaxChunk. Returns true if the chunk contained playing. */
     bool process (float* x, int n) noexcept;
+
+    void snapSmoothers() noexcept { drive.snap(); }
 
     static constexpr int kLatency = Oversampler4x::kLatency;
 

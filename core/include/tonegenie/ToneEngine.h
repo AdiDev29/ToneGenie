@@ -16,6 +16,9 @@ public:
     void set (float timeMs, float feedback, float mix) noexcept;
     void process (float* x, int n) noexcept;
 
+    /** Jump straight to the current settings instead of gliding there. */
+    void snap() noexcept { timeCur = timeTarget; mixCur = mixTarget; }
+
 private:
     double sr = 44100.0;
     DelayLine line;
@@ -47,6 +50,7 @@ private:
     int ap1Len = 1, ap2Len = 1, preLen = 1;
     float lineGain[kLines] {};
     float mixTarget = 0.0f, mixCur = 0.0f, decay = -1.0f;
+    bool idle = false;
 };
 
 struct EngineParams
@@ -100,6 +104,10 @@ public:
 
     /** Design filters inside process() instead (offline rendering, tests). */
     void setSynchronous (bool sync) noexcept { eq.setSynchronous (sync); }
+
+    /** Designs and installs the matching filter now, without a cross-fade.
+        Only while process() is not running (offline tools). */
+    void designNow() { eq.designNow(); }
 
     AdaptState getAdaptState() const noexcept;
     void getDisplay (BandArray& targetDb, BandArray& outputDb, BandArray& eqDb) const noexcept { eq.getDisplay (targetDb, outputDb, eqDb); }

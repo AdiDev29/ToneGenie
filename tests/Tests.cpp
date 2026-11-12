@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -284,6 +285,21 @@ void testEngineRobustness()
     out = runEngine (engine, nasty);
     CHECK (allFinite (out));
     CHECK_MSG (peakOf (out) < 8.0f, "square wave peak %.2f", peakOf (out));
+
+    // a NaN or Inf from upstream must not stick: the next clean input gives clean output
+    {
+        Signal bad ((size_t) (0.2 * sr), 0.1f);
+        bad[100] = std::numeric_limits<float>::quiet_NaN();
+        bad[200] = std::numeric_limits<float>::infinity();
+        out = runEngine (engine, bad);
+        CHECK (allFinite (out));
+
+        auto clean = cleanGuitar (0, sr);
+        clean.resize ((size_t) sr);
+        out = runEngine (engine, clean);
+        CHECK (allFinite (out));
+        CHECK_MSG (rmsDb (out) > -50.0f, "engine silent after a NaN: %.1f dB", rmsDb (out));
+    }
 
     // every voicing / drive / parameter corner
     auto guitar = cleanGuitar (2, sr);

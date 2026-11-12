@@ -15,7 +15,7 @@ namespace
     bool stringToFloats (const juce::String& text, float* dest, size_t count)
     {
         juce::MemoryBlock block;
-        if (text.isEmpty() || ! block.fromBase64Encoding (text) || block.getSize() != count * sizeof (float))
+        if (! decodeFloatBlock (text, count, count, block))
             return false;
         std::memcpy (dest, block.getData(), block.getSize());
         return true;
@@ -25,12 +25,19 @@ namespace
     {
         juce::MemoryBlock block;
         std::vector<float> v;
-        if (text.isNotEmpty() && block.fromBase64Encoding (text) && block.getSize() % sizeof (float) == 0)
+        if (decodeFloatBlock (text, 1, 16384, block))
         {
             v.resize (block.getSize() / sizeof (float));
             std::memcpy (v.data(), block.getData(), block.getSize());
         }
         return v;
+    }
+
+    /** Reads a number from saved state: never NaN/Inf, always inside [lo, hi]. */
+    float num (const juce::ValueTree& tree, const char* property, float fallback, float lo, float hi)
+    {
+        const auto v = (float) (double) tree.getProperty (property, fallback);
+        return std::isfinite (v) ? juce::jlimit (lo, hi, v) : fallback;
     }
 
     bool allFinite (const float* data, size_t count)
@@ -50,8 +57,19 @@ ReferenceManager::ReferenceManager (Listener& listenerToUse)
 
 ReferenceManager::~ReferenceManager()
 {
+    shutdown();
+}
+
+void ReferenceManager::shutdown()
+{
     stopThread (15000);
     cancelPendingUpdate();
+
+    // A completion callback may already be running on the message thread while
+    // we are being destroyed on another one (some plugin formats do that): wait
+    // for it, and turn any later one into a no-op.
+    const juce::ScopedLock cb (callbackLock);
+    dead = true;
 }
 
 juce::String ReferenceManager::getFileWildcard()
@@ -243,6 +261,10 @@ void ReferenceManager::run()
 
 void ReferenceManager::handleAsyncUpdate()
 {
+    const juce::ScopedLock cb (callbackLock);
+    if (dead)
+        return;
+
     tg::ReferenceResult result;
     {
         const juce::ScopedLock sl (lock);
@@ -336,9 +358,9 @@ bool ReferenceManager::fromValueTree (const juce::ValueTree& tree, tg::ToneProfi
             s.status = tree["status"].toString();
         s.settings.sourceMode = juce::jlimit (0, 2, (int) tree.getProperty ("sourceMode", 0));
         s.settings.focus = juce::jlimit (0, 3, (int) tree.getProperty ("focus", 0));
-        s.settings.regionStart = tree.getProperty ("regionStart", -1.0);
-        s.settings.regionEnd = tree.getProperty ("regionEnd", -1.0);
-        s.duration = tree.getProperty ("duration", 0.0);
+        s.settings.regionStart = num (tree, "regionStart", -1.0f, -1.0f, 1.0e6f);
+        s.settings.regionEnd = num (tree, "regionEnd", -1.0f, -1.0f, 1.0e6f);
+        s.duration = num (tree, "duration", 0.0f, 0.0f, 1.0e6f);
         s.thumbMin = stringToFloatVector (tree["thumbMin"].toString());
         s.thumbMax = stringToFloatVector (tree["thumbMax"].toString());
 
@@ -355,31 +377,31 @@ bool ReferenceManager::fromValueTree (const juce::ValueTree& tree, tg::ToneProfi
             tg::ToneProfile p;
             const bool arraysOk = stringToFloats (pt["target"].toString(), p.targetDb.data(), p.targetDb.size())
                                && stringToFloats (pt["expected"].toString(), p.expectedPreDb.data(), p.expectedPreDb.size())
-                               && allFinite (p.targetDb.data(), p.targetDb.size())
-                               && allFinite (p.expectedPreDb.data(), p.expectedPreDb.size());
+                               && allPlausibleDb (p.targetDb.data(), p.targetDb.size())
+                               && allPlausibleDb (p.expectedPreDb.data(), p.expectedPreDb.size());
 
             if (arraysOk)
             {
-                p.validLoHz = juce::jlimit (20.0f, 2000.0f, (float) pt.getProperty ("validLo", 60.0f));
-                p.validHiHz = juce::jlimit (2000.0f, 20000.0f, (float) pt.getProperty ("validHi", 16000.0f));
-                p.canonicalTiltDb = juce::jlimit (-40.0f, 40.0f, (float) pt.getProperty ("tilt", 0.0f));
+                p.validLoHz = num (pt, "validLo", 60.0f, 20.0f, 2000.0f);
+                p.validHiHz = num (pt, "validHi", 16000.0f, 2000.0f, 20000.0f);
+                p.canonicalTiltDb = num (pt, "tilt", 0.0f, -40.0f, 40.0f);
                 p.voicing = juce::jlimit (0, (int) tg::numVoicings - 1, (int) pt.getProperty ("voicing", 1));
-                p.drive = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("drive", 0.5f));
-                p.comp = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("comp", 0.0f));
-                p.gate = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("gate", 0.2f));
-                p.reverbMix = juce::jlimit (0.0f, 1.0f, (float) pt.getProperty ("reverbMix", 0.0f));
-                p.reverbDecay = juce::jlimit (0.2f, 8.0f, (float) pt.getProperty ("reverbDecay", 1.2f));
-                p.fitError = pt.getProperty ("fitError", 0.0f);
+                p.drive = num (pt, "drive", 0.5f, 0.0f, 1.0f);
+                p.comp = num (pt, "comp", 0.0f, 0.0f, 1.0f);
+                p.gate = num (pt, "gate", 0.2f, 0.0f, 1.0f);
+                p.reverbMix = num (pt, "reverbMix", 0.0f, 0.0f, 1.0f);
+                p.reverbDecay = num (pt, "reverbDecay", 1.2f, 0.2f, 8.0f);
+                p.fitError = num (pt, "fitError", 0.0f, 0.0f, 1.0e6f);
                 p.fromFullMix = pt.getProperty ("fromFullMix", false);
                 p.usedExposedGuitar = pt.getProperty ("exposed", false);
                 p.isolated = pt.getProperty ("isolated", false);
-                p.mixProbability = pt.getProperty ("mixProbability", 0.0f);
-                p.isolationPan = pt.getProperty ("pan", 0.0f);
-                p.usedStartSec = pt.getProperty ("usedStart", 0.0);
-                p.usedEndSec = pt.getProperty ("usedEnd", 0.0);
-                p.reference.crestDb = pt.getProperty ("crest", 0.0f);
-                p.reference.sustainDbPerSec = pt.getProperty ("sustain", 0.0f);
-                p.reference.levelSpreadDb = pt.getProperty ("spread", 0.0f);
+                p.mixProbability = num (pt, "mixProbability", 0.0f, 0.0f, 1.0f);
+                p.isolationPan = num (pt, "pan", 0.0f, -1.0f, 1.0f);
+                p.usedStartSec = num (pt, "usedStart", 0.0f, 0.0f, 1.0e6f);
+                p.usedEndSec = num (pt, "usedEnd", 0.0f, 0.0f, 1.0e6f);
+                p.reference.crestDb = num (pt, "crest", 0.0f, 0.0f, 100.0f);
+                p.reference.sustainDbPerSec = num (pt, "sustain", 0.0f, -200.0f, 20.0f);
+                p.reference.levelSpreadDb = num (pt, "spread", 0.0f, 0.0f, 200.0f);
                 p.reference.ltasDb = p.targetDb;
                 p.valid = true;
 

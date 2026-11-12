@@ -14,6 +14,12 @@
 #include <cstdio>
 #include <thread>
 
+#if JUCE_MAC
+// A plain main() has no NSApplication, and without one JUCE's dispatch loop
+// returns immediately. JUCE creates it with this (normally from JUCEApplicationBase::main).
+namespace juce { extern void initialiseNSApplication(); }
+#endif
+
 namespace
 {
 
@@ -339,6 +345,10 @@ void runTests (const juce::String& screenshotPath)
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI gui;
+
+   #if JUCE_MAC
+    juce::initialiseNSApplication();
+   #endif
     const juce::String screenshot = argc > 1 ? juce::String (argv[1]) : juce::String();
 
     // The tests run on their own thread while this thread pumps messages, like a host does.

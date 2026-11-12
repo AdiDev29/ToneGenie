@@ -512,7 +512,7 @@ ReferenceResult analyzeReference (const float* left, const float* right, size_t 
                     exposedSecs += s.endSec - s.startSec;
                 }
 
-            if (exposedSecs >= 6.0)
+            if (exposedSecs >= 5.5) // two analysis segments (each a little under 3 s)
             {
                 for (const auto* s : exposed)
                 {
@@ -582,7 +582,7 @@ ReferenceResult analyzeReference (const float* left, const float* right, size_t 
     // --- measure the tone -----------------------------------------------------------------
     prof.reference = analyzeTone (res.guitar.data(), res.guitar.size(), sampleRate);
 
-    if (prof.reference.activeSeconds < 1.0f || prof.reference.loudDb < -70.0f)
+    if (prof.reference.activeSeconds < 0.8f || prof.reference.loudDb < -70.0f)
     {
         res.message = "There is not enough guitar signal in this audio to learn a tone from.";
         return res;

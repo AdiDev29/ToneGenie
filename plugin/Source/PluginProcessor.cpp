@@ -78,6 +78,7 @@ ToneGenieProcessor::ToneGenieProcessor()
 
 ToneGenieProcessor::~ToneGenieProcessor()
 {
+    reference.shutdown(); // no analysis callback may arrive once members start going away
     designThread.stopThread (4000);
 }
 
@@ -99,6 +100,22 @@ void ToneGenieProcessor::prepareToPlay (double sampleRate, int)
     designThread.stopThread (4000);
 
     currentSampleRate = sampleRate;
+
+    // A state restored before audio started is applied now, so that the very
+    // first block (and an offline render of a fresh instance) already has it.
+    {
+        const juce::SpinLock::ScopedLockType sl (pendingLock);
+        if (pendingFlag.load (std::memory_order_acquire))
+        {
+            engine.setProfile (pendingHasProfile ? &pendingProfile : nullptr);
+            if (pendingHasAdapt)
+                engine.setAdaptState (pendingAdapt);
+            pendingHasAdapt = false;
+            pendingFlag.store (false, std::memory_order_release);
+        }
+    }
+
+    engine.setParams (readParams (pBypass->load() > 0.5f));
     engine.prepare (sampleRate);
     engine.reset();
     setLatencySamples (tg::ToneEngine::latencySamples());
@@ -349,8 +366,23 @@ void ToneGenieProcessor::getStateInformation (juce::MemoryBlock& destData)
     root.appendChild (apvts.copyState(), nullptr);
     root.appendChild (reference.toValueTree(), nullptr);
 
-    // What the engine has learned about the instrument.
-    const auto adapt = engine.getAdaptState();
+    // What the engine has learned about the instrument. If a restored state has
+    // not reached the audio thread yet, that one is still the truth.
+    tg::AdaptState adapt;
+    {
+        const juce::SpinLock::ScopedLockType sl (pendingLock);
+        if (! pendingFlag.load (std::memory_order_acquire))
+            adapt = engine.getAdaptState();
+        else if (pendingHasAdapt)
+            adapt = pendingAdapt;
+    }
+
+    if (auto xmlOnly = adapt.valid ? nullptr : root.createXml())
+    {
+        copyXmlToBinary (*xmlOnly, destData);
+        return;
+    }
+
     juce::ValueTree at ("Instrument");
     at.setProperty ("level", adapt.levelDb, nullptr);
     at.setProperty ("levelSeconds", adapt.levelSeconds, nullptr);
@@ -388,13 +420,10 @@ void ToneGenieProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (hasProfile && at.isValid() && (int) at.getProperty ("bands", 0) == tg::kNumBands)
     {
         juce::MemoryBlock block;
-        if (block.fromBase64Encoding (at["measured"].toString()) && block.getSize() == adapt.measuredDb.size() * sizeof (float))
+        if (decodeFloatBlock (at["measured"].toString(), adapt.measuredDb.size(), adapt.measuredDb.size(), block))
         {
             std::memcpy (adapt.measuredDb.data(), block.getData(), block.getSize());
-
-            bool finite = true;
-            for (float v : adapt.measuredDb)
-                finite = finite && std::isfinite (v);
+            const bool finite = allPlausibleDb (adapt.measuredDb.data(), adapt.measuredDb.size());
 
             adapt.levelDb = at.getProperty ("level", -26.0f);
             adapt.levelSeconds = at.getProperty ("levelSeconds", 0.0f);

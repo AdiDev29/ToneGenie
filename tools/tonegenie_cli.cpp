@@ -93,6 +93,18 @@ bool parse (int argc, char** argv, Args& a)
             return false;
     }
 
+    // --start or --end on its own means "from there" / "up to there"
+    auto& o = a.options;
+    if (o.regionStartSec >= 0.0 && o.regionEndSec < 0.0)
+        o.regionEndSec = 1.0e9;
+    if (o.regionEndSec >= 0.0 && o.regionStartSec < 0.0)
+        o.regionStartSec = 0.0;
+    if (o.regionStartSec >= 0.0 && o.regionEndSec <= o.regionStartSec + 0.5)
+    {
+        std::fprintf (stderr, "error: --end must be more than half a second after --start\n");
+        return false;
+    }
+
     return true;
 }
 
@@ -197,13 +209,19 @@ int main (int argc, char** argv)
 
     // First pass lets the engine learn the instrument, second pass is rendered
     // (in a DAW this happens while you play the first few bars).
+    engine.designNow();
+
     for (int pass = 0; pass < (args.adapt ? 2 : 1); ++pass)
+    {
+        engine.reset(); // keep what was learned, drop reverb tails and filter history
+
         for (size_t pos = 0; pos < n; pos += 512)
         {
             const int count = (int) std::min ((size_t) 512, n - pos);
             engine.process (inL + pos, inR != nullptr ? inR + pos : nullptr,
                             out.channels[0].data() + pos, out.channels[1].data() + pos, count);
         }
+    }
 
     if (! tg::writeWav (args.output, out, error))
     {
