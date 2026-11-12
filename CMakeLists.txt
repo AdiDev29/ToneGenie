@@ -47,11 +47,13 @@ target_include_directories(tonegenie_core PUBLIC core/include)
 find_package(Threads REQUIRED)
 target_link_libraries(tonegenie_core PUBLIC Threads::Threads)
 
+# No -ffast-math: the hot loops are vectorised by hand (Simd.h), and on Linux
+# fast-math would add a dependency on a recent glibc's vector math library.
 if(MSVC)
-    target_compile_options(tonegenie_core PRIVATE /W4 /fp:fast)
+    target_compile_options(tonegenie_core PRIVATE /W4)
     target_compile_definitions(tonegenie_core PUBLIC _USE_MATH_DEFINES NOMINMAX)
 else()
-    target_compile_options(tonegenie_core PRIVATE -Wall -Wextra -ffast-math)
+    target_compile_options(tonegenie_core PRIVATE -Wall -Wextra -fno-math-errno)
 endif()
 
 #===============================================================================
